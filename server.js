@@ -1,44 +1,46 @@
-// server.js — с поддержкой "глобальной" комнаты
+// server.js
+// Онлайн-сервер для крестиков-ноликов: автоматическое подключение без кода
+// Все игроки попадают в одну глобальную комнату
+
 const WebSocket = require('ws');
 const http = require('http');
-const url = require('url');
 
 const server = http.createServer();
 const wss = new WebSocket.Server({ server });
 
-// Одна комната для всех: "global"
-let globalRoom = {
-  players: [],
+// Единственная комната для всех
+let room = {
+  players: [],        // [player1, player2]
   board: Array(9).fill(null),
   turn: 'X',
   gameOver: false,
   winner: null
 };
 
-wss.on('connection', (ws, req) => {
-  const roomId = 'global'; // всегда одна комната
-  const room = globalRoom;
-
-  // Если комната полна
+wss.on('connection', (ws) => {
+  // Если в комнате уже 2 игрока — отклоняем нового
   if (room.players.length >= 2) {
-    ws.send(JSON.stringify({ error: 'Комната полна. Попробуйте позже.' }));
+    ws.send(JSON.stringify({
+      error: "Комната полна. Попробуйте позже."
+    }));
     ws.close();
     return;
   }
 
+  // Определяем символ игрока
   const symbol = room.players.length === 0 ? 'X' : 'O';
   room.players.push(ws);
   ws.symbol = symbol;
-  ws.roomId = roomId;
 
-  // Если игра уже завершена — сбросить (новый раунд с новыми игроками)
-  if (room.gameOver && room.players.length === 1) {
+  // Если комната была в состоянии "игра окончена", сбрасываем всё при новом первом игроке
+  if (room.players.length === 1 && room.gameOver) {
     room.board = Array(9).fill(null);
     room.turn = 'X';
     room.gameOver = false;
     room.winner = null;
   }
 
+  // Сообщаем игроку его статус
   ws.send(JSON.stringify({
     type: 'init',
     board: room.board,
@@ -47,67 +49,87 @@ wss.on('connection', (ws, req) => {
     opponentJoined: room.players.length === 2
   }));
 
+  // Уведомляем первого игрока, что пришёл второй
   if (room.players.length === 2) {
     room.players[0].send(JSON.stringify({ type: 'opponentJoined' }));
   }
 
+  // Обработка ходов
   ws.on('message', (data) => {
+    // Игнорируем, если игра окончена или игроков меньше двух
     if (room.gameOver || room.players.length < 2) return;
 
     try {
       const msg = JSON.parse(data);
-      if (msg.type === 'move' && room.turn === ws.symbol && room.board[msg.index] === null) {
+      if (
+        msg.type === 'move' &&
+        typeof msg.index === 'number' &&
+        msg.index >= 0 && msg.index <= 8 &&
+        room.turn === ws.symbol &&
+        room.board[msg.index] === null
+      ) {
+        // Делаем ход
         room.board[msg.index] = ws.symbol;
 
+        // Проверка победы
         const win = checkWin(room.board, ws.symbol);
-        const full = room.board.every(c => c !== null);
+        const full = room.board.every(cell => cell !== null);
 
         if (win) {
           room.gameOver = true;
           room.winner = ws.symbol;
-          broadcast(room, { type: 'gameOver', winner: ws.symbol, board: room.board });
+          broadcast({ type: 'gameOver', winner: ws.symbol, board: room.board });
         } else if (full) {
           room.gameOver = true;
           room.winner = null;
-          broadcast(room, { type: 'gameOver', winner: null, board: room.board });
+          broadcast({ type: 'gameOver', winner: null, board: room.board });
         } else {
+          // Передаём ход
           room.turn = ws.symbol === 'X' ? 'O' : 'X';
-          broadcast(room, { type: 'move', board: room.board, turn: room.turn });
+          broadcast({ type: 'move', board: room.board, turn: room.turn });
         }
       }
-    } catch (e) {}
+    } catch (e) {
+      console.error('Ошибка обработки хода:', e);
+    }
   });
 
+  // Обработка отключения игрока
   ws.on('close', () => {
-    const idx = room.players.indexOf(ws);
-    if (idx !== -1) room.players.splice(idx, 1);
+    const index = room.players.indexOf(ws);
+    if (index !== -1) {
+      room.players.splice(index, 1);
+    }
 
+    // Если остался один игрок — уведомить его
     if (room.players.length === 1) {
       room.players[0].send(JSON.stringify({ type: 'opponentLeft' }));
-      // Не удаляем комнату — ждём нового игрока
     }
-    // Если игроков нет — комната остаётся, но будет сброшена при следующем первом игроке
+    // Если игроков нет — комната остаётся, но будет сброшена при следующем заходе первого игрока
   });
 });
 
+// Проверка победы
 function checkWin(board, player) {
   const lines = [
     [0,1,2], [3,4,5], [6,7,8],
     [0,3,6], [1,4,7], [2,5,8],
     [0,4,8], [2,4,6]
   ];
-  return lines.some(l => l.every(i => board[i] === player));
+  return lines.some(line => line.every(i => board[i] === player));
 }
 
-function broadcast(room, msg) {
-  room.players.forEach(p => {
-    if (p.readyState === WebSocket.OPEN) {
-      p.send(JSON.stringify(msg));
+// Отправка сообщения обоим игрокам
+function broadcast(message) {
+  room.players.forEach(player => {
+    if (player.readyState === WebSocket.OPEN) {
+      player.send(JSON.stringify(message));
     }
   });
 }
 
+// Запуск сервера
 const PORT = process.env.PORT || 3000;
 server.listen(PORT, () => {
-  console.log(`✅ Глобальная комната готова на порту ${PORT}`);
+  console.log(`✅ Сервер запущен. Глобальная комната готова на порту ${PORT}`);
 });
