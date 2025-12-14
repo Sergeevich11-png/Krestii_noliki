@@ -1,7 +1,4 @@
-// server.js
-// Онлайн-сервер для крестиков-ноликов: автоматическое подключение без кода
-// Все игроки попадают в одну глобальную комнату
-
+// server.js — с поддержкой keep-alive для Render
 const WebSocket = require('ws');
 const http = require('http');
 
@@ -32,7 +29,7 @@ wss.on('connection', (ws) => {
   room.players.push(ws);
   ws.symbol = symbol;
 
-  // Если комната была в состоянии "игра окончена", сбрасываем всё при новом первом игроке
+  // Сбрасываем игру, если она завершена и пришёл первый игрок
   if (room.players.length === 1 && room.gameOver) {
     room.board = Array(9).fill(null);
     room.turn = 'X';
@@ -40,7 +37,7 @@ wss.on('connection', (ws) => {
     room.winner = null;
   }
 
-  // Сообщаем игроку его статус
+  // Отправляем начальное состояние
   ws.send(JSON.stringify({
     type: 'init',
     board: room.board,
@@ -56,7 +53,6 @@ wss.on('connection', (ws) => {
 
   // Обработка ходов
   ws.on('message', (data) => {
-    // Игнорируем, если игра окончена или игроков меньше двух
     if (room.gameOver || room.players.length < 2) return;
 
     try {
@@ -68,10 +64,8 @@ wss.on('connection', (ws) => {
         room.turn === ws.symbol &&
         room.board[msg.index] === null
       ) {
-        // Делаем ход
         room.board[msg.index] = ws.symbol;
 
-        // Проверка победы
         const win = checkWin(room.board, ws.symbol);
         const full = room.board.every(cell => cell !== null);
 
@@ -84,7 +78,6 @@ wss.on('connection', (ws) => {
           room.winner = null;
           broadcast({ type: 'gameOver', winner: null, board: room.board });
         } else {
-          // Передаём ход
           room.turn = ws.symbol === 'X' ? 'O' : 'X';
           broadcast({ type: 'move', board: room.board, turn: room.turn });
         }
@@ -94,22 +87,31 @@ wss.on('connection', (ws) => {
     }
   });
 
-  // Обработка отключения игрока
+  // Обработка отключения
   ws.on('close', () => {
     const index = room.players.indexOf(ws);
     if (index !== -1) {
       room.players.splice(index, 1);
     }
 
-    // Если остался один игрок — уведомить его
     if (room.players.length === 1) {
       room.players[0].send(JSON.stringify({ type: 'opponentLeft' }));
     }
-    // Если игроков нет — комната остаётся, но будет сброшена при следующем заходе первого игрока
+  });
+
+  // ⚡️ Keep-Alive: отправляем пинг каждые 25 секунд
+  const keepAliveInterval = setInterval(() => {
+    if (ws.readyState === WebSocket.OPEN) {
+      ws.ping(); // отправляем ping
+    }
+  }, 25000); // 25 секунд
+
+  // Очищаем интервал при отключении
+  ws.on('close', () => {
+    clearInterval(keepAliveInterval);
   });
 });
 
-// Проверка победы
 function checkWin(board, player) {
   const lines = [
     [0,1,2], [3,4,5], [6,7,8],
@@ -119,7 +121,6 @@ function checkWin(board, player) {
   return lines.some(line => line.every(i => board[i] === player));
 }
 
-// Отправка сообщения обоим игрокам
 function broadcast(message) {
   room.players.forEach(player => {
     if (player.readyState === WebSocket.OPEN) {
@@ -128,7 +129,6 @@ function broadcast(message) {
   });
 }
 
-// Запуск сервера
 const PORT = process.env.PORT || 3000;
 server.listen(PORT, () => {
   console.log(`✅ Сервер запущен. Глобальная комната готова на порту ${PORT}`);
